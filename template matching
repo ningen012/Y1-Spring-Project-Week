@@ -1,0 +1,129 @@
+import cv2
+import numpy as np
+from picamera2 import Picamera2
+import time
+import os
+
+# Initialize Picamera2
+picam2 = Picamera2()
+config = picam2.create_preview_configuration(main={"size": (320, 240)})  # Higher resolution 
+picam2.configure(config)
+picam2.start()
+time.sleep(2)  # Allow camera to warm up
+
+# Path to template folder
+TEMPLATE_DIR = "/home/pi/templates/"
+
+# Load symbol templates with different thresholds for different symbols
+template_files = {
+    "Right Arrow": ("right arrow.png", 0.65),
+    "Left Arrow": ("left arrow.png", 0.65),
+    "Up Arrow": ("up arrow.png", 0.65),
+    "Down Arrow": ("down arrow.png", 0.65),
+    "Stop Sign": ("stop sign.png", 0.6),
+    "Distancing Sign": ("distance measurement.png", 0.4),  # Lower threshold
+    "Traffic Light Stop": ("traffic light stop.png", 0.5),  # Lower threshold
+    "Face Recognition": ("face recognition.png", 0.35),
+    "Pentagon": ("pentagon.png", 0.65),
+    "Partial circle": ("partial circle.png", 0.7),
+    "Rectangle": ("rectangle.png", 0.65),
+    "Hexagon": ("hexagon.png", 0.65),
+    "Triangle": ("triangle.png", 0.65),
+    "Circle": ("circle.png", 0.65)
+    
+}
+
+# Read templates in grayscale
+templates = {}
+for symbol, (filename, threshold) in template_files.items():
+    path = os.path.join(TEMPLATE_DIR, filename)
+    template = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if template is None:
+        print(f"⚠️ Warning: Could not load {filename}. Check if the file exists and is a valid image.")
+    else:
+        templates[symbol] = (template, threshold)
+
+# Function to perform multi-scale template matching
+def multi_scale_template_match(image, template, threshold):
+    detected = False
+    max_val_global = 0
+    loc_global = None
+    size_global = None
+
+    img_h, img_w = image.shape  # Get input image dimensions
+
+    for scale in np.linspace(0.5, 3.0, 15):  # Expanded scale range
+        width = max(1, int(template.shape[1] * scale))  
+        height = max(1, int(template.shape[0] * scale)) 
+
+        # Skip if resized template is larger than input image
+        if width > img_w or height > img_h:
+            continue  # Skip this scale
+
+        resized = cv2.resize(template, (width, height))
+
+        result = cv2.matchTemplate(image, resized, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+
+        if max_val > max_val_global:
+            max_val_global = max_val
+            loc_global = max_loc
+            size_global = (width, height)
+
+    if max_val_global > threshold:
+        detected = True
+
+    return detected, max_val_global, loc_global, size_global
+
+
+# Main loop
+while True:
+    # Capture frame from the camera
+    frame = picam2.capture_array()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    
+    detected_symbols = []
+    match_scores = {}
+    
+    # First pass - detect all symbols
+    for symbol_name, (template, threshold) in templates.items():
+        detected, max_val, top_left, size = multi_scale_template_match(gray, template, threshold)
+        
+        if detected:
+            detected_symbols.append(symbol_name)
+            match_scores[symbol_name] = max_val
+            w, h = size
+            bottom_right = (top_left[0] + w, top_left[1] + h)
+            
+            # Draw bounding box around detected symbol
+            cv2.rectangle(frame, top_left, bottom_right, (0, 255, 0), 2)
+            cv2.putText(frame, f"{symbol_name} ({max_val:.2f})", (top_left[0], top_left[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    
+    # Second pass - resolve conflicts between similar symbols
+    final_symbols = []
+    
+    
+    # Display the list of detected symbols
+    y_pos = 30
+    cv2.putText(frame, "Detected Symbols:", (10, y_pos), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+    for symbol in final_symbols:
+        y_pos += 25
+        cv2.putText(frame, f"- {symbol}", (20, y_pos), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+    
+    # Show the processed frame
+    cv2.imshow("Symbol Recognition", frame)
+    
+    # Press 'q' to quit
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Cleanup
+picam2.stop()
+cv2.destroyAllWindows()
